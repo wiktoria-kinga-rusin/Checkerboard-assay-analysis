@@ -1,0 +1,71 @@
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(minpack.lm)
+
+data <- read_excel("mortality_corrected_capped.xlsx")
+oa_data <- data %>% filter(treatment_type == "OA only")
+pe_data <- data %>% filter(treatment_type == "PE only")
+combo_data <- data %>% filter(treatment_type == "Combined")
+
+#Fit dose–response curves for OA and PE. Fitting the Hill equation to single agent dose–response data using nonlinear least squares to use the parameters for ZIP predictions
+
+#Hill equation
+hill_model <- function(dose, Ef, EC50, n) {
+  Ef / (1 + (EC50 / dose)^n)
+}
+
+#OA curve
+fit_oa <- nlsLM(
+  corrected_mortality ~ hill_model(OA_conc, Ef, EC50, n),
+  data = oa_data,
+  start = list(Ef = 100, EC50 = 1, n = 1),
+  lower = c(0, 1e-5, 0.1),
+  upper = c(100, 100, 10)
+)
+
+#PE curve
+fit_pe <- nlsLM(
+  corrected_mortality ~ hill_model(PE_conc, Ef, EC50, n),
+  data = pe_data,
+  start = list(Ef = 100, EC50 = 0.01, n = 1),
+  lower = c(0, 1e-5, 0.1),
+  upper = c(100, 1, 10)
+)
+#Pull out parameters
+params_oa <- coef(fit_oa)
+params_pe <- coef(fit_pe)
+
+#Prediction functions for OA and PE
+
+#Smooth response functions 
+predict_OA <- function(d) {
+  hill_model(d, Ef = params_oa["Ef"], EC50 = params_oa["EC50"], n = params_oa["n"])
+}
+
+predict_PE <- function(d) {
+  hill_model(d, Ef = params_pe["Ef"], EC50 = params_pe["EC50"], n = params_pe["n"])
+}
+
+#ZIP expected mortality and ZIP score
+combo_zip <- combo_data %>%
+  mutate(
+    effect_OA = predict_OA(OA_conc),
+    effect_PE = predict_PE(PE_conc),
+    expected_zip = effect_OA + effect_PE - (effect_OA * effect_PE / 100),
+    zip_score = corrected_mortality - expected_zip
+  )
+
+#Group interaction types based on ZIP score thresholds
+combo_zip <- combo_zip %>%
+  mutate(
+    interaction_type = case_when(
+      zip_score >= 10 ~ "Synergy",
+      zip_score <= -10 ~ "Antagonism",
+      TRUE ~ "Additive"
+    )
+  )
+
+#ZIP ≥ 10 synergy
+#ZIP ≤ –10 antagonism
+#–10 < ZIP < 10 additive
