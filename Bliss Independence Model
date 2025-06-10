@@ -1,0 +1,62 @@
+###Abbott's Correction 
+
+mortality_corrected <- mortality_summary %>%
+  mutate(
+    corrected_mortality = ((mortality_percent - overall_tween_mortality) / (100 - overall_tween_mortality)) * 100,
+    corrected_mortality = ifelse(corrected_mortality < 0, 0, corrected_mortality),
+    interaction_type = case_when(
+      corrected_mortality > 0 ~ "Synergistic / Additive",
+      corrected_mortality == 0 ~ "Indifferent"
+    )
+  )
+
+###Bliss Independence Model
+oa_only <- mortality_corrected %>%
+  filter(treatment_type == "OA only") %>%
+  select(OA_conc, corrected_mortality) %>%
+  rename(OA_Mortality = corrected_mortality)
+
+pe_only <- mortality_corrected %>%
+  filter(treatment_type == "PE only") %>%
+  select(PE_conc, corrected_mortality) %>%
+  rename(PE_Mortality = corrected_mortality)
+
+checkerboard_grid <- mortality_corrected %>%
+  filter(treatment_type == "Combined") %>%
+  select(OA_conc, PE_conc) %>%
+  distinct()
+
+bliss_expected <- checkerboard_grid %>%
+  left_join(oa_only, by = "OA_conc") %>%
+  left_join(pe_only, by = "PE_conc") %>%
+  mutate(
+    Expected_bliss = OA_Mortality + PE_Mortality - (OA_Mortality * PE_Mortality / 100)
+  )
+
+observed_combined <- mortality_corrected %>%
+  filter(treatment_type == "Combined") %>%
+  select(OA_conc, PE_conc, corrected_mortality) %>%
+  rename(Observed_combination_mortality = corrected_mortality)
+
+bliss_final <- bliss_expected %>%
+  left_join(observed_combined, by = c("OA_conc", "PE_conc")) %>%
+  mutate(
+    Difference = Observed_combination_mortality - Expected_bliss,
+    Interaction = case_when(
+      is.na(Difference) ~ "Data missing",
+      Difference > 0 ~ "Synergistic",
+      Difference < 0 ~ "Antagonistic",
+      TRUE ~ "Additive"
+    )
+  )
+
+
+print(bliss_final)
+
+#Filter combination data
+
+model_data <- mortality_corrected %>%
+  filter(treatment_type == "Combined") %>%
+  mutate(
+    mortality_proportion = corrected_mortality / 100
+  )
