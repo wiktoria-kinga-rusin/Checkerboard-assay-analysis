@@ -1,0 +1,135 @@
+library(devtools)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(readxl)
+library(writexl)
+library(minpack.lm)
+library(plotly)
+library(brms)
+
+#Log10 of the concentrations
+
+data <- read_excel("mortality_corrected_capped.xlsx")
+
+#BRAID assumes a log scale
+#Only combination treatments
+oa_data <- data %>%
+  filter(treatment_type == "OA only") %>%
+  mutate(log_OA = log10(OA_conc + 1e-6))  # avoid log(0)
+
+pe_data <- data %>%
+  filter(treatment_type == "PE only") %>%
+  mutate(log_PE = log10(PE_conc + 1e-6))  # avoid log(0)
+
+#Estimate the % mortality in single agent using lc50, slope, and max effect
+
+#3-parameter log-logistic Hill model
+hill_curve <- function(dose, Ef, IDM, n) {
+  Ef / (1 + (IDM / dose)^n)
+}
+#Fitting the the Hill curve to and and PE mortality to get Ef, IDM and n
+
+fit_oa <- nlsLM(
+  corrected_mortality ~ hill_curve(10^log_OA, Ef, IDM, n),
+  data = oa_data,
+  start = list(Ef = 100, IDM = 1, n = 1),
+  lower = c(0, 1e-5, 0.1),
+  upper = c(100, 100, 10)
+)
+
+summary(fit_oa)
+
+params_oa <- coef(fit_oa)
+
+fit_pe <- nlsLM(
+  corrected_mortality ~ hill_curve(10^log_PE, Ef, IDM, n),
+  data = pe_data,
+  start = list(Ef = 100, IDM = 0.01, n = 1),
+  lower = c(0, 1e-5, 0.1),
+  upper = c(100, 1, 10)
+)
+
+summary(fit_pe)
+
+params_pe <- coef(fit_pe)
+
+print(params_oa)
+
+print(params_pe)
+
+#Everything fits well - proceeding with BRAID
+
+#BRAID will calculate expected mortality at any dose combo adjusting for interaction with a the parameter kappa
+
+#kappa > 0 = synergy kappa= 0 = additive kappa< 0 = antagonism
+
+#8 parameter BRAID model with EfA and EfB fixed at 100
+braid_model_fixedEf <- function(dose_OA, dose_PE, E0, IDM_A, IDM_B, n_A, n_B, kappa) {
+  EfA <- 100
+  EfB <- 100
+  na_nb <- sqrt(n_A * n_B)
+  D_A_tilde <- (dose_OA / IDM_A)^n_A
+  ratio_B <- (EfB - E0) / (EfA - E0)
+  D_B_tilde <- (ratio_B * (dose_PE / IDM_B)^n_B) / 
+    (1 + (1 - ratio_B) * (dose_PE / IDM_B)^n_B)
+  
+  D_AB <- D_A_tilde^(1 / na_nb) + D_B_tilde^(1 / na_nb) + 
+          kappa * sqrt(D_A_tilde^(1 / na_nb) * D_B_tilde^(1 / na_nb))
+  
+  E0 + (EfA - E0) / (1 + D_AB^(-na_nb))
+}
+
+#Filter combo data only and fit BRAID to that
+
+combo_data <- data %>%
+  filter(treatment_type == "Combined")
+
+#log10 doses
+combo_data <- combo_data %>%
+  mutate(
+    log_OA = log10(OA_conc + 1e-6),
+    log_PE = log10(PE_conc + 1e-6)
+  )
+
+#constraints and fixed EfA/EfB
+fit_braid_fixedEf <- nlsLM(
+  corrected_mortality ~ braid_model_fixedEf(OA_conc, PE_conc, E0, IDM_A, IDM_B, n_A, n_B, kappa),
+  data = combo_data,
+  start = list(
+    E0 = 0,
+    IDM_A = params_oa["IDM"],
+    IDM_B = params_pe["IDM"],
+    n_A = params_oa["n"],
+    n_B = params_pe["n"],
+    kappa = 0
+  ),
+  lower = c(
+    E0 = 0,
+    IDM_A = params_oa["IDM"] * 0.5,
+    IDM_B = params_pe["IDM"] * 0.5,
+    n_A = params_oa["n"] * 0.7,
+    n_B = params_pe["n"] * 0.7,
+    kappa = -5
+  ),
+  upper = c(
+    E0 = 20,
+    IDM_A = params_oa["IDM"] * 1.5,
+    IDM_B = params_pe["IDM"] * 1.5,
+    n_A = params_oa["n"] * 1.3,
+    n_B = params_pe["n"] * 1.3,
+    kappa = 5
+  ),
+  control = nls.lm.control(maxiter = 1000, ftol = 1e-8)
+)
+
+summary(fit_braid_fixedEf)
+
+#Extract k and use BRAID to caulcaute predicted mortlaity for every OA and PE combo
+
+#Extract interaction parameter k 
+kappa_fixed <- coef(fit_braid_fixedEf)["kappa"]
+print(paste("Estimated BRAID k:", round(kappa_fixed, 3)))
+
+#Add predicted values to the dataframe
+combo_data$predicted_mortality_braid <- predict(fit_braid_fixedEf)
