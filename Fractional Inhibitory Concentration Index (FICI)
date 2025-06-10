@@ -1,0 +1,49 @@
+library(dplyr)
+library(tidyverse)
+library(readxl)
+library(writexl)
+
+checkerboard_data <- checkerboard_data %>%
+  mutate(
+    corrected_mortality = as.numeric(corrected_mortality),
+    OA_conc = round(OA_conc, 5),
+    PE_conc = round(PE_conc, 5)
+  )
+
+#Subset OA-only and PE-only rows
+OA_only <- checkerboard_data %>% filter(PE_conc == 0)
+PE_only <- checkerboard_data %>% filter(OA_conc == 0)
+
+#Find lowest concentration that gives ≥50% mortality
+LC50_OA <- OA_only %>%
+  filter(corrected_mortality >= 50) %>%
+  arrange(OA_conc) %>%
+  slice(1) %>%
+  pull(OA_conc)
+
+LC50_PE <- PE_only %>%
+  filter(corrected_mortality >= 50) %>%
+  arrange(PE_conc) %>%
+  slice(1) %>%
+  pull(PE_conc)
+
+fici_data <- checkerboard_data %>%
+  filter(treatment_type == "Combined") %>%
+  mutate(
+    FIC_OA = OA_conc / LC50_OA,
+    FIC_PE = PE_conc / LC50_PE,
+    FICI = FIC_OA + FIC_PE,
+    Interaction = case_when(
+      corrected_mortality < 50 ~ "Not comparable",   # not reaching LC50
+      FICI <= 0.5 ~ "Synergistic",
+      FICI > 0.5 & FICI <= 1 ~ "Additive",
+      FICI > 1 & FICI <= 4 ~ "Indifferent",
+      FICI > 4 ~ "Antagonistic"
+    )
+  )
+
+fici_export <- dplyr::select(fici_data,
+  OA_conc, PE_conc, corrected_mortality, FIC_OA, FIC_PE, FICI, Interaction
+)
+
+write_xlsx(fici_export, "FICI_LC50_results.xlsx")
