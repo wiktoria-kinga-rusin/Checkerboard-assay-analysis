@@ -1,0 +1,42 @@
+library(dplyr)
+library(writexl)
+library(readxl)
+
+#Extract OA-only and PE-only responses
+OA_only <- checkerboard_data %>% filter(PE_conc == 0)
+PE_only <- checkerboard_data %>% filter(OA_conc == 0)
+
+#Join OA and PE single agent effects to combination data for HSA calculation
+hsa_data <- checkerboard_data %>%
+  filter(treatment_type == "Combined") %>%  # Only combination treatments
+  left_join(  #Join OA-only mortality data by OA concentration
+    OA_only %>%
+      dplyr::select(OA_conc, corrected_mortality) %>%
+      dplyr::rename(OA_mort = corrected_mortality),
+    by = "OA_conc"
+  ) %>%
+  left_join(  #Join PE-only mortality data by PE concentration
+    PE_only %>%
+      dplyr::select(PE_conc, corrected_mortality) %>%
+      dplyr::rename(PE_mort = corrected_mortality),
+    by = "PE_conc"
+  ) %>%
+  mutate(
+    #Calculate HSA expected mortality = highest of the two single agents
+    max_single = pmax(OA_mort, PE_mort, na.rm = TRUE),
+
+    #HSA deviation = actual combo mortality - expected (max single)
+    HSA_dev = corrected_mortality - max_single,
+
+    #Classify interaction based only on HSA_dev (no special rule for 0 mortality)
+    HSA_Interaction = case_when(
+      HSA_dev > 10 ~ "Synergistic", #>10% better than best agent
+      HSA_dev < -10 ~ "Antagonistic", #>10% worse than best agent
+      TRUE ~ "Additive" #±10% range = additive
+    )
+  )
+
+hsa_export <- hsa_data %>%
+  dplyr::select(OA_conc, PE_conc, corrected_mortality, OA_mort, PE_mort, max_single, HSA_dev, HSA_Interaction)
+
+write_xlsx(hsa_export, "HSA_results.xlsx")
