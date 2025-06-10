@@ -133,3 +133,71 @@ print(paste("Estimated BRAID k:", round(kappa_fixed, 3)))
 
 #Add predicted values to the dataframe
 combo_data$predicted_mortality_braid <- predict(fit_braid_fixedEf)
+
+#Make the prediction grid
+oa_vals <- sort(unique(combo_data$OA_conc))  
+pe_vals <- sort(unique(combo_data$PE_conc)) 
+
+grid <- expand.grid(OA_conc = oa_vals, PE_conc = pe_vals) %>%
+  arrange(OA_conc, PE_conc)
+
+
+params <- coef(fit_braid_fixedEf)
+
+braid_manual <- function(OA, PE) {
+  EfA <- 100
+  EfB <- 100
+  E0 <- params["E0"]
+  IDM_A <- params["IDM_A.IDM"]
+  IDM_B <- params["IDM_B.IDM"]
+  n_A <- params["n_A.n"]
+  n_B <- params["n_B.n"]
+  kappa <- params["kappa"]
+  
+  na_nb <- sqrt(n_A * n_B)
+  D_A_tilde <- (OA / IDM_A)^n_A
+  ratio_B <- (EfB - E0) / (EfA - E0)
+  D_B_tilde <- (ratio_B * (PE / IDM_B)^n_B) / 
+    (1 + (1 - ratio_B) * (PE / IDM_B)^n_B)
+  D_AB <- D_A_tilde^(1/na_nb) + D_B_tilde^(1/na_nb) + 
+          kappa * sqrt(D_A_tilde^(1/na_nb) * D_B_tilde^(1/na_nb))
+  
+  E0 + (EfA - E0) / (1 + D_AB^(-na_nb))
+}
+
+grid$predicted <- mapply(braid_manual, grid$OA_conc, grid$PE_conc)
+
+z_matrix <- matrix(grid$predicted,
+                   nrow = length(pe_vals),
+                   ncol = length(oa_vals),
+                   byrow = FALSE)
+
+x_vals <- log10(oa_vals + 1e-6) 
+y_vals <- log10(pe_vals + 1e-6)  
+
+x_labels <- formatC(oa_vals, format = "fg", digits = 3)
+y_labels <- formatC(pe_vals, format = "fg", digits = 3)
+
+
+plot_ly() %>%
+  add_surface(x = x_vals, y = y_vals, z = z_matrix,
+              colorscale = list(c(0, 1), c("yellow", "firebrick")),
+              showscale = TRUE, name = "BRAID surface") %>%
+  add_markers(data = combo_data,
+              x = ~log10(OA_conc + 1e-6),
+              y = ~log10(PE_conc + 1e-6),
+              z = ~corrected_mortality,
+              marker = list(color = 'black', size = 4),
+              name = "Observed") %>%
+  layout(
+    title = "BRAID Predicted Mortality with Observed Points",
+    scene = list(
+      xaxis = list(title = "OA concentration",
+                   tickvals = x_vals,
+                   ticktext = x_labels),
+      yaxis = list(title = "PE concentration",
+                   tickvals = y_vals,
+                   ticktext = y_labels),
+      zaxis = list(title = "Mortality (%)")
+    )
+  )
