@@ -1,0 +1,66 @@
+library(tidyverse)
+library(drc)
+library(readxl)
+library(writexl)
+library(dplyr)
+
+checkerboard_data <- read_excel("mortality_corrected_capped.xlsx")
+
+
+#Extract single agent data from OA and PE to fit their respecitve dose-response models
+
+OA_only <- checkerboard_data %>%
+  filter(PE_conc == 0) %>%
+  dplyr::select(OA_conc, corrected_mortality) %>%
+  rename(Conc = OA_conc, Mortality = corrected_mortality) %>%
+  mutate(Agent = "OA")
+
+PE_only <- checkerboard_data %>%
+  filter(OA_conc == 0) %>%
+  dplyr::select(PE_conc, corrected_mortality) %>%
+  rename(Conc = PE_conc, Mortality = corrected_mortality) %>%
+  mutate(Agent = "PE")
+
+#Combine the OA and PE subsets into one dataset for fitting
+
+dose_response_data <- bind_rows(OA_only, PE_only)
+
+#Fit a 4-parameter log logistic models to PE and OA to assess how they affect mortality
+#The model will estimate the minimum effect, maximum effect, midpoint and the slope
+
+model_PE_4pl <- drm(Mortality ~ Conc, data = filter(dose_response_data, Agent == "PE"), fct = LL.4())
+model_OA_4pl <- drm(Mortality ~ Conc, data = filter(dose_response_data, Agent == "OA"), fct = LL.4())
+
+#Get the Loewe index function using the fitted models
+
+calculate_loewe_4pl <- function(d1, d2, effect) {
+  if (effect <= 0 | effect >= 100) return(NA)
+  
+  de1 <- suppressWarnings(ED(model_PE_4pl, effect, type = "absolute", display = FALSE)[1])
+  de2 <- suppressWarnings(ED(model_OA_4pl, effect, type = "absolute", display = FALSE)[1])
+  
+  if (is.na(de1) | is.na(de2)) return(NA)
+  
+  (d1 / de1) + (d2 / de2)
+}
+
+#Apply Loewe index to every combination
+
+checkerboard_modelled_4pl <- checkerboard_data %>%
+  rowwise() %>%
+  mutate(
+    loewe_index = calculate_loewe_4pl(PE_conc, OA_conc, corrected_mortality),
+    interaction = case_when(
+      corrected_mortality == 0 ~ "No interaction",
+      loewe_index < 0.95 ~ "Synergistic",
+      loewe_index > 1.05 ~ "Antagonistic",
+      TRUE ~ "Additive"
+    )
+  ) %>%
+  ungroup()
+
+export_data <- checkerboard_modelled_4pl %>%
+  ungroup() %>%
+  dplyr::select(PE_conc, OA_conc, corrected_mortality, loewe_index, interaction)
+
+write_xlsx(export_data, "Loewe_4PL_Results.xlsx")
